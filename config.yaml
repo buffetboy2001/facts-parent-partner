@@ -1,0 +1,4 @@
+downloads:
+  location: ./downloads
+  max_recent: 0
+headless: false

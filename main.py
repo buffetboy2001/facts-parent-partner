@@ -1,19 +1,120 @@
-"""Automate the FACTS Family Portal sign-in and sign-out flow.
-
-Authentication settings must be supplied in the process environment. Run with
-``uv run --env-file .env`` locally; this script never reads .env itself.
-"""
+"""Download PDF resources for a class in the FACTS Family Portal."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
+from pathlib import Path
 import re
+import tempfile
+import time
+from urllib.parse import urljoin
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import Download, Frame, Locator, Page, TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+import yaml
 
 
 FAMILY_PORTAL_URL = "https://sis.factsmgt.com/family-portal"
+PDF_PATTERN = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
+CONFIG_PATH = Path(__file__).with_name("config.yaml")
+CLASS_LINK_SELECTOR = "tr a[href]"
+APP_HEADER_SELECTOR = "mat-toolbar.app-header"
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Runtime settings for one all-class resource download run."""
+
+    username: str
+    password: str
+    district_code: str
+    download_dir: Path
+    max_pdfs: int | None
+    headless: bool
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """Non-sensitive settings loaded from ``config.yaml``."""
+
+    download_dir: Path
+    max_pdfs: int | None
+    headless: bool
+
+
+def required_environment(name: str) -> str:
+    """Return a required environment value without exposing it in errors."""
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"Required setting {name} is unavailable.")
+    return value
+
+
+def writable_download_directory(location: str, config_path: Path) -> Path:
+    """Create and verify the configured download directory before using it."""
+    configured_path = Path(location).expanduser()
+    directory = configured_path if configured_path.is_absolute() else config_path.parent / configured_path
+    if directory.exists() and not directory.is_dir():
+        raise RuntimeError(f"Configured download location is not a directory: {directory}")
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError(f"Cannot create download directory: {directory}") from error
+    if not directory.is_dir():
+        raise RuntimeError(f"Configured download location is not a directory: {directory}")
+
+    # ``os.access`` can be misleading with ACLs, so verify permissions by
+    # creating a temporary file in the target directory instead.
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory):
+            pass
+    except OSError as error:
+        raise RuntimeError(f"Download directory is not writable: {directory}") from error
+    return directory.resolve()
+
+
+def load_config(config_path: Path = CONFIG_PATH) -> AppConfig:
+    """Load and validate the non-sensitive application configuration."""
+    try:
+        with config_path.open(encoding="utf-8") as file:
+            data = yaml.safe_load(file)
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Configuration file was not found: {config_path}") from error
+    except yaml.YAMLError as error:
+        raise RuntimeError(f"Configuration file is invalid YAML: {config_path}") from error
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Configuration must contain a YAML mapping.")
+    downloads = data.get("downloads")
+    if not isinstance(downloads, dict):
+        raise RuntimeError("Configuration field 'downloads' must be a mapping.")
+    download_location = downloads.get("location")
+    max_recent = downloads.get("max_recent", 0)
+    if not isinstance(download_location, str) or not download_location.strip():
+        raise RuntimeError("Configuration field 'downloads.location' must be a non-empty string.")
+    if not isinstance(max_recent, int) or isinstance(max_recent, bool) or max_recent < 0:
+        raise RuntimeError("Configuration field 'downloads.max_recent' must be a non-negative integer.")
+    headless = data.get("headless", False)
+    if not isinstance(headless, bool):
+        raise RuntimeError("Configuration field 'headless' must be true or false.")
+    return AppConfig(
+        download_dir=writable_download_directory(download_location, config_path),
+        max_pdfs=max_recent or None,
+        headless=headless,
+    )
+
+
+def load_settings(config: AppConfig) -> Settings:
+    """Build settings from environment variables and validate simple options."""
+    return Settings(
+        username=required_environment("FACTS_USERNAME"),
+        password=required_environment("FACTS_PASSWORD"),
+        district_code=required_environment("FACTS_DISTRICT_CODE"),
+        download_dir=config.download_dir,
+        max_pdfs=config.max_pdfs,
+        headless=config.headless,
+    )
 
 
 def click_if_present(page: Page, name: str, timeout: int = 5_000) -> bool:
@@ -27,81 +128,249 @@ def click_if_present(page: Page, name: str, timeout: int = 5_000) -> bool:
     return True
 
 
+def sign_in(page: Page, settings: Settings) -> None:
+    """Authenticate and wait for the SIS Family Portal home screen."""
+    page.goto(FAMILY_PORTAL_URL, wait_until="domcontentloaded")
+    district_input = page.locator("#rw-district-code")
+    district_input.wait_for(state="visible")
+    district_input.fill(settings.district_code)
+    if district_input.input_value() != settings.district_code:
+        raise RuntimeError("The district code could not be entered.")
+    page.locator("#next").click()
+
+    username_input = page.get_by_label(re.compile(r"username|email", re.IGNORECASE))
+    username_input.wait_for(state="visible", timeout=30_000)
+    username_input.fill(settings.username)
+    password_input = page.locator("input[name='password']")
+    password_input.wait_for(state="visible")
+    password_input.fill(settings.password)
+
+    sign_in_button = page.locator("button[type='submit'][aria-label='sign in']")
+    sign_in_button.wait_for(state="visible")
+    page.wait_for_function(
+        "button => !button.disabled",
+        arg=sign_in_button.element_handle(),
+        timeout=30_000,
+    )
+    sign_in_button.click()
+    click_if_present(page, "Maybe later", timeout=12_000)
+    page.wait_for_url("**sis.factsmgt.com/**", timeout=30_000)
+    page.get_by_text("School Home", exact=True).wait_for(state="visible", timeout=30_000)
+
+
+def open_classes(page: Page) -> None:
+    """Navigate to Classes and wait for its client-side route to settle."""
+    classes_link = page.locator("a[href*='/school/classes']").first
+    try:
+        classes_link.wait_for(state="visible", timeout=5_000)
+    except PlaywrightTimeoutError:
+        # Keep a text fallback for portal versions without an href.
+        page.get_by_text("Classes", exact=True).first.click()
+    else:
+        classes_link.click()
+    page.wait_for_url("**/school/classes**", timeout=30_000)
+    wait_for_route_settle(page)
+
+
+def visible_app_shell_count(page: Page) -> int:
+    """Return the rendered FACTS headers in the stable top-level document.
+
+    FACTS replaces child frames during routing. Inspecting those transient
+    frames here can race with their detachment, while the top-level shell is
+    sufficient for this short route-settling check.
+    """
+    headers = page.locator(APP_HEADER_SELECTOR)
+    return sum(headers.nth(index).is_visible() for index in range(headers.count()))
+
+
+def wait_for_route_settle(page: Page, timeout: float = 15) -> None:
+    """Wait until route rendering stops changing without rejecting valid frames."""
+    deadline = time.monotonic() + timeout
+    previous_state: tuple[str, int] | None = None
+    stable_samples = 0
+    while time.monotonic() < deadline:
+        current_state = (page.url, visible_app_shell_count(page))
+        if current_state == previous_state:
+            stable_samples += 1
+            if stable_samples == 3:
+                return
+        else:
+            stable_samples = 0
+            previous_state = current_state
+        page.wait_for_timeout(500)
+
+
+def class_link_container(page: Page) -> tuple[Page | Frame, Locator]:
+    """Locate class links in the page or an embedded FACTS school frame."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        for container in [page, *page.frames]:
+            # FACTS currently renders a conventional table. Do not require
+            # ``tbody``: some portal variants omit it while retaining rows.
+            class_links = container.locator(CLASS_LINK_SELECTOR)
+            if class_links.count() and class_links.first.is_visible():
+                return container, class_links
+        page.wait_for_timeout(500)
+    raise RuntimeError(
+        "FACTS did not render any class links in the Classes page or its "
+        "embedded school content."
+    )
+
+
+def enrolled_class_urls(page: Page) -> list[tuple[str, str]]:
+    """Collect the Class-column links from the loaded Classes table."""
+    container, class_links = class_link_container(page)
+
+    classes: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for index in range(class_links.count()):
+        link = class_links.nth(index)
+        href = link.get_attribute("href")
+        if not href:
+            continue
+        url = urljoin(container.url, href)
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        classes.append((link.inner_text().strip(), url))
+    return classes
+
+
+def open_class_resources(page: Page, class_url: str) -> bool:
+    """Open one class and report whether its Resources tab has documents."""
+    page.goto(class_url, wait_until="domcontentloaded")
+    wait_for_route_settle(page)
+
+    # The sidebar also contains a "Resources" entry, so use the final match:
+    # the class tab appears after the sidebar in the document order.
+    resources_tab = page.get_by_text("Resources", exact=True).last
+    resources_tab.wait_for(state="visible", timeout=30_000)
+    resources_tab.click()
+    return wait_for_documents_state(page)
+
+
+def wait_for_documents_state(page: Page) -> bool:
+    """Wait for either the document list or FACTS's empty-resources message.
+
+    The Documents heading includes a Material icon in its accessible text, so
+    an exact ``Documents`` locator cannot identify this state reliably.
+    """
+    page.wait_for_function(
+        """() => {
+            const text = document.body.innerText;
+            return text.includes('Upload Order') || text.includes('No documents found.');
+        }""",
+        timeout=30_000,
+    )
+    return "No documents found." not in page.locator("body").inner_text()
+
+
+def is_pdf_resource(text: str, href: str | None) -> bool:
+    """Identify PDF resources from either their displayed name or URL."""
+    return bool(PDF_PATTERN.search(text.strip()) or (href and PDF_PATTERN.search(href)))
+
+
+def pdf_resource_links(page: Page) -> list[Locator]:
+    """Return visible PDF links in the portal's displayed order."""
+    links = page.locator("a")
+    pdf_links: list[Locator] = []
+    for index in range(links.count()):
+        link = links.nth(index)
+        if link.is_visible() and is_pdf_resource(link.inner_text(), link.get_attribute("href")):
+            pdf_links.append(link)
+    return pdf_links
+
+
+def download_control(link: Locator) -> Locator:
+    """Use a resource row's download icon when FACTS provides one.
+
+    The recording uses this icon, while some portal versions download directly
+    from the resource name. Supporting both keeps the automation compatible.
+    """
+    row = link.locator("xpath=ancestor::tr[1]")
+    controls = row.locator(
+        "[aria-label*='download' i], [title*='download' i], "
+        "[mattooltip*='download' i], .download"
+    )
+    return controls.first if controls.count() else link
+
+
+def unique_destination(directory: Path, filename: str) -> Path:
+    """Avoid overwriting a file downloaded by an earlier run."""
+    destination = directory / filename
+    stem, suffix = destination.stem, destination.suffix
+    counter = 2
+    while destination.exists():
+        destination = directory / f"{stem} ({counter}){suffix}"
+        counter += 1
+    return destination
+
+
+def no_resources_marker(directory: Path, class_label: str) -> Path:
+    """Create the requested empty marker file for a class with no documents."""
+    safe_class_label = re.sub(r"[^A-Za-z0-9._-]+", "_", class_label).strip("._")
+    filename = f"{safe_class_label or 'class'}_no_resources.txt"
+    marker = directory / filename
+    marker.write_text("", encoding="utf-8")
+    return marker
+
+
+def download_pdfs(page: Page, settings: Settings) -> list[Path]:
+    """Download displayed PDF resources, optionally limited to the newest entries."""
+    links = pdf_resource_links(page)
+    if settings.max_pdfs is not None:
+        links = links[: settings.max_pdfs]
+
+    saved_files: list[Path] = []
+    for link in links:
+        with page.expect_download(timeout=30_000) as download_info:
+            download_control(link).click()
+        download: Download = download_info.value
+        destination = unique_destination(settings.download_dir, download.suggested_filename)
+        download.save_as(destination)
+        saved_files.append(destination)
+    return saved_files
+
+
+def download_all_class_resources(page: Page, settings: Settings) -> tuple[list[Path], list[Path]]:
+    """Visit every listed class and collect PDFs or no-resource markers."""
+    open_classes(page)
+    classes = enrolled_class_urls(page)
+    saved_files: list[Path] = []
+    no_resource_markers: list[Path] = []
+    for class_label, class_url in classes:
+        try:
+            has_documents = open_class_resources(page, class_url)
+            if not has_documents:
+                no_resource_markers.append(
+                    no_resources_marker(settings.download_dir, class_label)
+                )
+                continue
+            saved_files.extend(download_pdfs(page, settings))
+        except (PlaywrightTimeoutError, RuntimeError) as error:
+            print(f"Skipped {class_label}: resources could not be loaded ({error}).")
+    return saved_files, no_resource_markers
+
+
 def main() -> None:
-    username = os.environ.get("FACTS_USERNAME")
-    password = os.environ.get("FACTS_PASSWORD")
-    district_code = os.environ.get("FACTS_DISTRICT_CODE")
-    if not username or not password or not district_code:
-        raise RuntimeError("Required authentication settings are unavailable.")
-
-    # The recorded window is 1280 px wide. Set HEADLESS=true for CI.
-    headless = os.environ.get("HEADLESS", "false").lower() == "true"
-
+    """Sign in and save PDF resources for every class on the Classes page."""
+    settings = load_settings(load_config())
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=headless)
-        context = browser.new_context(viewport={"width": 1280, "height": 720})
+        browser = playwright.chromium.launch(headless=settings.headless)
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 720}, accept_downloads=True
+        )
         page = context.new_page()
         page.set_default_timeout(15_000)
-
         try:
-            # Enter through the same Family Portal URL as the site's login link.
-            # FACTS first asks for a district code, then presents the account form.
-            page.goto(FAMILY_PORTAL_URL, wait_until="domcontentloaded")
-            district_input = page.locator("#rw-district-code")
-            district_input.wait_for(state="visible")
-            district_input.fill(district_code)
-
-            # Do not use Playwright's value assertion here: its failure message
-            # would include the configured district code in terminal output.
-            if district_input.input_value() != district_code:
-                raise RuntimeError("The district code could not be entered.")
-            page.locator("#next").click()
-
-            # FACTS has used both "Username" and "Username or Email" labels.
-            username_input = page.get_by_label(
-                re.compile(r"username|email", re.IGNORECASE)
+            sign_in(page, settings)
+            downloaded_files, no_resource_markers = download_all_class_resources(
+                page, settings
             )
-            username_input.wait_for(state="visible", timeout=30_000)
-            username_input.fill(username)
-            # The label "Password" also labels FACTS's show-password button,
-            # so target the password input rather than using a label regex.
-            password_input = page.locator("input[name='password']")
-            password_input.wait_for(state="visible")
-            password_input.fill(password)
-
-            # Angular enables this button only after it validates both fields.
-            # Wait for that state instead of racing the reactive form update.
-            sign_in = page.locator("button[type='submit'][aria-label='sign in']")
-            sign_in.wait_for(state="visible")
-            page.wait_for_function(
-                "button => !button.disabled",
-                arg=sign_in.element_handle(),
-                timeout=30_000,
+            print(
+                f"Downloaded {len(downloaded_files)} PDF resource(s); created "
+                f"{len(no_resource_markers)} no-resources marker file(s)."
             )
-            sign_in.click()
-
-            # The video chooses this option only when the MFA screen appears.
-            click_if_present(page, "Maybe later", timeout=12_000)
-
-            # FACTS redirects through Nelnet, then loads the SIS family portal.
-            page.wait_for_url("**sis.factsmgt.com/**", timeout=30_000)
-            page.get_by_text("School Home", exact=True).wait_for(
-                state="visible", timeout=30_000
-            )
-
-            # Open the top-right initials avatar. It has no stable accessible
-            # name, but the app-bar menu-trigger classes are stable in FACTS.
-            profile_menu = page.locator(
-                "button.mat-mdc-menu-trigger.app-bar-badge"
-            )
-            profile_menu.wait_for(state="visible")
-            profile_menu.click()
-            page.get_by_text("Log Out", exact=True).wait_for(state="visible")
-            page.get_by_text("Log Out", exact=True).click()
-            page.get_by_text("Session Logged Out", exact=True).wait_for(
-                state="visible", timeout=20_000
-            )
-            print("Signed in, deferred MFA when offered, and logged out.")
         finally:
             context.close()
             browser.close()
