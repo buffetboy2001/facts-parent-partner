@@ -27,6 +27,7 @@ PDF_PATTERN = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
 UPLOAD_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 CLASS_LINK_SELECTOR = "tr a[href]"
+CLASSES_RENDER_DELAY_MS = 5_000
 WEEKDAY_NAMES = {
     name.lower(): number
     for number, name in enumerate(
@@ -194,6 +195,10 @@ def open_classes(page: Page) -> None:
     else:
         classes_link.click()
     page.wait_for_url("**/school/classes**", timeout=30_000)
+    # FACTS often updates the URL before its class-list application finishes
+    # initializing. Give that client-side transition time to complete before
+    # polling for class links.
+    page.wait_for_timeout(CLASSES_RENDER_DELAY_MS)
 
 
 def class_link_container(page: Page) -> tuple[Page | Frame, Locator]:
