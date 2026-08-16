@@ -57,8 +57,9 @@ directory, without stopping the other classes. Resources are processed in the
 portal's shown order. `downloads.since` accepts a weekday name and downloads
 only files with a later displayed upload date. For example, on Sunday, 16 August
 2026, `since: monday` uses 10 August 2026 as the cutoff and downloads files
-uploaded on 11 August or later. Set `headless: true` in `config.yaml` to run
-without a browser window. Existing downloads are never overwritten.
+uploaded on 11 August or later. Use `since: all` to ignore upload dates and
+download every PDF found for each class. Set `headless: true` in `config.yaml`
+to run without a browser window. Existing downloads are never overwritten.
 
 ---
 

@@ -43,7 +43,7 @@ class Settings:
     password: str
     district_code: str
     download_dir: Path
-    since: date
+    since: date | None
     headless: bool
 
 
@@ -52,7 +52,7 @@ class AppConfig:
     """Non-sensitive settings loaded from ``config.yaml``."""
 
     download_dir: Path
-    since: date
+    since: date | None
     headless: bool
 
 
@@ -87,8 +87,10 @@ def writable_download_directory(location: str, config_path: Path) -> Path:
     return directory.resolve()
 
 
-def most_recent_weekday(weekday_name: str, today: date | None = None) -> date:
-    """Return the most recent named weekday, including today when it matches."""
+def most_recent_weekday(weekday_name: str, today: date | None = None) -> date | None:
+    """Return a weekday cutoff, or ``None`` when ``all`` is configured."""
+    if weekday_name.lower() == "all":
+        return None
     weekday = WEEKDAY_NAMES.get(weekday_name.lower())
     if weekday is None:
         valid_days = ", ".join(WEEKDAY_NAMES)
@@ -318,11 +320,13 @@ def no_resources_marker(directory: Path, class_label: str) -> Path:
 
 
 def download_pdfs(page: Page, settings: Settings) -> list[Path]:
-    """Download PDFs whose displayed upload date is newer than the cutoff."""
+    """Download PDFs newer than the cutoff, or every PDF in ``all`` mode."""
     saved_files: list[Path] = []
     for link in pdf_resource_links(page):
         upload_date = resource_upload_date(link)
-        if upload_date is None or upload_date <= settings.since:
+        if settings.since is not None and (
+            upload_date is None or upload_date <= settings.since
+        ):
             continue
         with page.expect_download(timeout=30_000) as download_info:
             download_control(link).click()
@@ -368,10 +372,15 @@ def main() -> None:
             downloaded_files, no_resource_markers = download_all_class_resources(
                 page, settings
             )
+            cutoff_description = (
+                "all upload dates"
+                if settings.since is None
+                else f"upload dates after {settings.since:%d %B %Y}"
+            )
             print(
-                f"Downloaded {len(downloaded_files)} PDF resource(s) uploaded after "
-                f"{settings.since:%d %B %Y}; created "
-                f"{len(no_resource_markers)} no-resources marker file(s)."
+                f"Downloaded {len(downloaded_files)} PDF resource(s) for "
+                f"{cutoff_description}; created {len(no_resource_markers)} "
+                "no-resources marker file(s)."
             )
         finally:
             context.close()

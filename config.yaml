@@ -1,4 +1,4 @@
 downloads:
   location: ./downloads
-  since: monday
+  since: all
 headless: false
