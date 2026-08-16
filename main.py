@@ -45,6 +45,7 @@ class Settings:
     district_code: str
     download_dir: Path
     since: date | None
+    skipped_classes: frozenset[str]
     headless: bool
 
 
@@ -54,6 +55,7 @@ class AppConfig:
 
     download_dir: Path
     since: date | None
+    skipped_classes: frozenset[str]
     headless: bool
 
 
@@ -100,6 +102,11 @@ def most_recent_weekday(weekday_name: str, today: date | None = None) -> date | 
     return calendar_day - timedelta(days=(calendar_day.weekday() - weekday) % 7)
 
 
+def normalized_class_label(label: str) -> str:
+    """Normalize a displayed class name for skip-list comparisons."""
+    return " ".join(label.split()).casefold()
+
+
 def load_config(config_path: Path = CONFIG_PATH) -> AppConfig:
     """Load and validate the non-sensitive application configuration."""
     try:
@@ -113,20 +120,29 @@ def load_config(config_path: Path = CONFIG_PATH) -> AppConfig:
     if not isinstance(data, dict):
         raise RuntimeError("Configuration must contain a YAML mapping.")
     downloads = data.get("downloads")
+    classes = data.get("classes", {})
     if not isinstance(downloads, dict):
         raise RuntimeError("Configuration field 'downloads' must be a mapping.")
+    if not isinstance(classes, dict):
+        raise RuntimeError("Configuration field 'classes' must be a mapping.")
     download_location = downloads.get("location")
     since = downloads.get("since")
     if not isinstance(download_location, str) or not download_location.strip():
         raise RuntimeError("Configuration field 'downloads.location' must be a non-empty string.")
     if not isinstance(since, str) or not since.strip():
         raise RuntimeError("Configuration field 'downloads.since' must be a weekday name.")
+    skip = classes.get("skip", [])
+    if not isinstance(skip, list) or any(
+        not isinstance(class_name, str) or not class_name.strip() for class_name in skip
+    ):
+        raise RuntimeError("Configuration field 'classes.skip' must be a list of class names.")
     headless = data.get("headless", False)
     if not isinstance(headless, bool):
         raise RuntimeError("Configuration field 'headless' must be true or false.")
     return AppConfig(
         download_dir=writable_download_directory(download_location, config_path),
         since=most_recent_weekday(since.strip()),
+        skipped_classes=frozenset(normalized_class_label(class_name) for class_name in skip),
         headless=headless,
     )
 
@@ -139,6 +155,7 @@ def load_settings(config: AppConfig) -> Settings:
         district_code=required_environment("FACTS_DISTRICT_CODE"),
         download_dir=config.download_dir,
         since=config.since,
+        skipped_classes=config.skipped_classes,
         headless=config.headless,
     )
 
@@ -349,6 +366,9 @@ def download_all_class_resources(page: Page, settings: Settings) -> tuple[list[P
     saved_files: list[Path] = []
     no_resource_markers: list[Path] = []
     for class_label, class_url in classes:
+        if normalized_class_label(class_label) in settings.skipped_classes:
+            print(f"Skipped {class_label}: configured in classes.skip.")
+            continue
         try:
             has_documents = open_class_resources(page, class_url)
             if not has_documents:

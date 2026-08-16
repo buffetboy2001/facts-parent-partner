@@ -32,6 +32,9 @@ Configure downloads and other non-secret preferences in `config.yaml`:
 downloads:
   location: ./downloads
   since: monday # Download files uploaded after the most recent Monday.
+classes:
+  skip:
+    - ST HALL-M/F 9th # Exact Class-column labels to exclude before navigation.
 headless: false
 ```
 
@@ -60,6 +63,10 @@ only files with a later displayed upload date. For example, on Sunday, 16 August
 uploaded on 11 August or later. Use `since: all` to ignore upload dates and
 download every PDF found for each class. Set `headless: true` in `config.yaml`
 to run without a browser window. Existing downloads are never overwritten.
+
+Add class labels to `classes.skip` when a class is known never to have
+resources. Skipped classes are not opened; matching ignores capitalization and
+extra spaces.
 
 ---
 
