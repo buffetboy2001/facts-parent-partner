@@ -35,7 +35,7 @@ downloads:
 classes:
   skip:
     - ST HALL-M/F 9th # Exact Class-column labels to exclude before navigation.
-headless: false
+visible: true
 ```
 
 Relative download paths are resolved from the directory containing
@@ -61,7 +61,7 @@ portal's shown order. `downloads.since` accepts a weekday name and downloads
 only files with a later displayed upload date. For example, on Sunday, 16 August
 2026, `since: monday` uses 10 August 2026 as the cutoff and downloads files
 uploaded on 11 August or later. Use `since: all` to ignore upload dates and
-download every PDF found for each class. Set `headless: true` in `config.yaml`
+download every PDF found for each class. Set `visible: false` in `config.yaml`
 to run without a browser window. Existing downloads are never overwritten.
 
 Add class labels to `classes.skip` when a class is known never to have

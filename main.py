@@ -56,7 +56,7 @@ class AppConfig:
     download_dir: Path
     since: date | None
     skipped_classes: frozenset[str]
-    headless: bool
+    visible: bool
 
 
 def required_environment(name: str) -> str:
@@ -136,14 +136,14 @@ def load_config(config_path: Path = CONFIG_PATH) -> AppConfig:
         not isinstance(class_name, str) or not class_name.strip() for class_name in skip
     ):
         raise RuntimeError("Configuration field 'classes.skip' must be a list of class names.")
-    headless = data.get("headless", False)
-    if not isinstance(headless, bool):
-        raise RuntimeError("Configuration field 'headless' must be true or false.")
+    visible = data.get("visible", True)
+    if not isinstance(visible, bool):
+        raise RuntimeError("Configuration field 'visible' must be true or false.")
     return AppConfig(
         download_dir=writable_download_directory(download_location, config_path),
         since=most_recent_weekday(since.strip()),
         skipped_classes=frozenset(normalized_class_label(class_name) for class_name in skip),
-        headless=headless,
+        visible=visible,
     )
 
 
@@ -156,7 +156,7 @@ def load_settings(config: AppConfig) -> Settings:
         download_dir=config.download_dir,
         since=config.since,
         skipped_classes=config.skipped_classes,
-        headless=config.headless,
+        headless=not config.visible,
     )
 
 

@@ -5,4 +5,4 @@ classes:
   skip:
     - ST HALL-M/F 9th
     - AM ASSEMBLY-9
-headless: false
+visible: true
