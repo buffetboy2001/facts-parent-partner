@@ -11,7 +11,13 @@ import tempfile
 import time
 from urllib.parse import urljoin
 
-from playwright.sync_api import Download, Frame, Locator, Page, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    Download,
+    Frame,
+    Locator,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 from playwright.sync_api import sync_playwright
 import yaml
 
@@ -21,7 +27,6 @@ PDF_PATTERN = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
 UPLOAD_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 CLASS_LINK_SELECTOR = "tr a[href]"
-APP_HEADER_SELECTOR = "mat-toolbar.app-header"
 WEEKDAY_NAMES = {
     name.lower(): number
     for number, name in enumerate(
@@ -177,7 +182,7 @@ def sign_in(page: Page, settings: Settings) -> None:
 
 
 def open_classes(page: Page) -> None:
-    """Navigate to Classes and wait for its client-side route to settle."""
+    """Navigate to Classes; the class-list wait is the readiness signal."""
     classes_link = page.locator("a[href*='/school/classes']").first
     try:
         classes_link.wait_for(state="visible", timeout=5_000)
@@ -187,35 +192,6 @@ def open_classes(page: Page) -> None:
     else:
         classes_link.click()
     page.wait_for_url("**/school/classes**", timeout=30_000)
-    wait_for_route_settle(page)
-
-
-def visible_app_shell_count(page: Page) -> int:
-    """Return the rendered FACTS headers in the stable top-level document.
-
-    FACTS replaces child frames during routing. Inspecting those transient
-    frames here can race with their detachment, while the top-level shell is
-    sufficient for this short route-settling check.
-    """
-    headers = page.locator(APP_HEADER_SELECTOR)
-    return sum(headers.nth(index).is_visible() for index in range(headers.count()))
-
-
-def wait_for_route_settle(page: Page, timeout: float = 15) -> None:
-    """Wait until route rendering stops changing without rejecting valid frames."""
-    deadline = time.monotonic() + timeout
-    previous_state: tuple[str, int] | None = None
-    stable_samples = 0
-    while time.monotonic() < deadline:
-        current_state = (page.url, visible_app_shell_count(page))
-        if current_state == previous_state:
-            stable_samples += 1
-            if stable_samples == 3:
-                return
-        else:
-            stable_samples = 0
-            previous_state = current_state
-        page.wait_for_timeout(500)
 
 
 def class_link_container(page: Page) -> tuple[Page | Frame, Locator]:
@@ -257,7 +233,6 @@ def enrolled_class_urls(page: Page) -> list[tuple[str, str]]:
 def open_class_resources(page: Page, class_url: str) -> bool:
     """Open one class and report whether its Resources tab has documents."""
     page.goto(class_url, wait_until="domcontentloaded")
-    wait_for_route_settle(page)
 
     # The sidebar also contains a "Resources" entry, so use the final match:
     # the class tab appears after the sidebar in the document order.
