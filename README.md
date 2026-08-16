@@ -31,7 +31,7 @@ Configure downloads and other non-secret preferences in `config.yaml`:
 ```yaml
 downloads:
   location: ./downloads
-  max_recent: 0 # Download every displayed PDF for each class.
+  since: monday # Download files uploaded after the most recent Monday.
 headless: false
 ```
 
@@ -54,9 +54,11 @@ The script visits every link in the Classes table, opens each class's
 **Resources** tab, and saves its displayed PDF documents. A class with no
 resources receives an empty `[class]_no_resources.txt` marker in the download
 directory, without stopping the other classes. Resources are processed in the
-portal's shown order. Set `downloads.max_recent` to a positive number to limit
-downloads per class, or `0` for all PDFs. Set `headless: true` in `config.yaml`
-to run without a browser window. Existing downloads are never overwritten.
+portal's shown order. `downloads.since` accepts a weekday name and downloads
+only files with a later displayed upload date. For example, on Sunday, 16 August
+2026, `since: monday` uses 10 August 2026 as the cutoff and downloads files
+uploaded on 11 August or later. Set `headless: true` in `config.yaml` to run
+without a browser window. Existing downloads are never overwritten.
 
 ---
 

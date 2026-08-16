@@ -1,4 +1,4 @@
 downloads:
   location: ./downloads
-  max_recent: 0
+  since: monday
 headless: false

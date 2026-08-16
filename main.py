@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 import os
 from pathlib import Path
 import re
@@ -17,9 +18,16 @@ import yaml
 
 FAMILY_PORTAL_URL = "https://sis.factsmgt.com/family-portal"
 PDF_PATTERN = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
+UPLOAD_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 CLASS_LINK_SELECTOR = "tr a[href]"
 APP_HEADER_SELECTOR = "mat-toolbar.app-header"
+WEEKDAY_NAMES = {
+    name.lower(): number
+    for number, name in enumerate(
+        ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+    )
+}
 
 
 @dataclass(frozen=True)
@@ -30,7 +38,7 @@ class Settings:
     password: str
     district_code: str
     download_dir: Path
-    max_pdfs: int | None
+    since: date
     headless: bool
 
 
@@ -39,7 +47,7 @@ class AppConfig:
     """Non-sensitive settings loaded from ``config.yaml``."""
 
     download_dir: Path
-    max_pdfs: int | None
+    since: date
     headless: bool
 
 
@@ -74,6 +82,16 @@ def writable_download_directory(location: str, config_path: Path) -> Path:
     return directory.resolve()
 
 
+def most_recent_weekday(weekday_name: str, today: date | None = None) -> date:
+    """Return the most recent named weekday, including today when it matches."""
+    weekday = WEEKDAY_NAMES.get(weekday_name.lower())
+    if weekday is None:
+        valid_days = ", ".join(WEEKDAY_NAMES)
+        raise RuntimeError(f"Configuration field 'downloads.since' must be a weekday: {valid_days}.")
+    calendar_day = today or date.today()
+    return calendar_day - timedelta(days=(calendar_day.weekday() - weekday) % 7)
+
+
 def load_config(config_path: Path = CONFIG_PATH) -> AppConfig:
     """Load and validate the non-sensitive application configuration."""
     try:
@@ -90,17 +108,17 @@ def load_config(config_path: Path = CONFIG_PATH) -> AppConfig:
     if not isinstance(downloads, dict):
         raise RuntimeError("Configuration field 'downloads' must be a mapping.")
     download_location = downloads.get("location")
-    max_recent = downloads.get("max_recent", 0)
+    since = downloads.get("since")
     if not isinstance(download_location, str) or not download_location.strip():
         raise RuntimeError("Configuration field 'downloads.location' must be a non-empty string.")
-    if not isinstance(max_recent, int) or isinstance(max_recent, bool) or max_recent < 0:
-        raise RuntimeError("Configuration field 'downloads.max_recent' must be a non-negative integer.")
+    if not isinstance(since, str) or not since.strip():
+        raise RuntimeError("Configuration field 'downloads.since' must be a weekday name.")
     headless = data.get("headless", False)
     if not isinstance(headless, bool):
         raise RuntimeError("Configuration field 'headless' must be true or false.")
     return AppConfig(
         download_dir=writable_download_directory(download_location, config_path),
-        max_pdfs=max_recent or None,
+        since=most_recent_weekday(since.strip()),
         headless=headless,
     )
 
@@ -112,7 +130,7 @@ def load_settings(config: AppConfig) -> Settings:
         password=required_environment("FACTS_PASSWORD"),
         district_code=required_environment("FACTS_DISTRICT_CODE"),
         download_dir=config.download_dir,
-        max_pdfs=config.max_pdfs,
+        since=config.since,
         headless=config.headless,
     )
 
@@ -281,6 +299,15 @@ def pdf_resource_links(page: Page) -> list[Locator]:
     return pdf_links
 
 
+def resource_upload_date(link: Locator) -> date | None:
+    """Read the upload date displayed alongside a resource in its table row."""
+    row_text = link.locator("xpath=ancestor::tr[1]").inner_text()
+    match = UPLOAD_DATE_PATTERN.search(row_text)
+    if not match:
+        return None
+    return datetime.strptime(match.group(), "%m/%d/%Y").date()
+
+
 def download_control(link: Locator) -> Locator:
     """Use a resource row's download icon when FACTS provides one.
 
@@ -316,13 +343,12 @@ def no_resources_marker(directory: Path, class_label: str) -> Path:
 
 
 def download_pdfs(page: Page, settings: Settings) -> list[Path]:
-    """Download displayed PDF resources, optionally limited to the newest entries."""
-    links = pdf_resource_links(page)
-    if settings.max_pdfs is not None:
-        links = links[: settings.max_pdfs]
-
+    """Download PDFs whose displayed upload date is newer than the cutoff."""
     saved_files: list[Path] = []
-    for link in links:
+    for link in pdf_resource_links(page):
+        upload_date = resource_upload_date(link)
+        if upload_date is None or upload_date <= settings.since:
+            continue
         with page.expect_download(timeout=30_000) as download_info:
             download_control(link).click()
         download: Download = download_info.value
@@ -368,7 +394,8 @@ def main() -> None:
                 page, settings
             )
             print(
-                f"Downloaded {len(downloaded_files)} PDF resource(s); created "
+                f"Downloaded {len(downloaded_files)} PDF resource(s) uploaded after "
+                f"{settings.since:%d %B %Y}; created "
                 f"{len(no_resource_markers)} no-resources marker file(s)."
             )
         finally:
