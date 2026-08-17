@@ -1,24 +1,24 @@
-<#!
+<#
 .SYNOPSIS
-Runs the FACTS Parent Partner automation with the local authentication file.
+Runs the installed FACTS Parent Partner tool for scheduled automation.
 #>
 
+param(
+    [string]$ConfigPath = (Join-Path $PSScriptRoot 'config.yaml')
+)
+
 $ErrorActionPreference = 'Stop'
-$projectRoot = $PSScriptRoot
-
-foreach ($requiredFile in @('.env', 'config.yaml', 'main.py')) {
-    $path = Join-Path $projectRoot $requiredFile
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        Write-Error "Required file is missing: $path"
-        exit 1
-    }
+if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+    Write-Error "Configuration file is missing: $ConfigPath"
+    exit 1
 }
 
-Push-Location $projectRoot
-try {
-    & uv run --env-file .env python main.py
-    exit $LASTEXITCODE
+ $toolBin = & uv tool dir --bin
+ $executable = Join-Path $toolBin 'facts-parent-partner.exe'
+if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+    Write-Error "FACTS Parent Partner is not installed. Run: uv tool install git+https://github.com/buffetboy2001/facts-parent-partner.git"
+    exit 1
 }
-finally {
-    Pop-Location
-}
+
+& $executable --config (Resolve-Path -LiteralPath $ConfigPath)
+exit $LASTEXITCODE

@@ -1,3 +1,4 @@
 # Local credentials and machine-specific environment configuration
 .env
 downloads/*
+__pycache__

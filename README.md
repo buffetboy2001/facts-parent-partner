@@ -16,7 +16,8 @@ If Playwright has not installed Chromium on this machine yet:
 uv run playwright install chromium
 ```
 
-Create a local `.env` file containing the required authentication settings. 
+For repository development, create a local `.env` file containing the required
+authentication settings.
 
 ```dotenv
 FACTS_USERNAME=
@@ -45,10 +46,11 @@ an error if it cannot.
 
 ## Run
 
-`main.py` is the primary entry point. Use uv to load the local environment file and run it:
+From the repository root on macOS, use uv to load the local `.env` file and
+run the packaged command:
 
 ```bash
-uv run --env-file .env python main.py
+uv run --env-file .env facts-parent-partner --config config.yaml
 ```
 
 From PowerShell, run:
@@ -56,6 +58,34 @@ From PowerShell, run:
 ```powershell
 .\run.ps1
 ```
+
+## Windows scheduled automation
+
+Install the packaged command once on the target machine:
+
+```powershell
+uv tool install git+https://github.com/buffetboy2001/facts-parent-partner.git
+uv tool update-shell
+```
+
+The installation provides `facts-parent-partner.exe`. Keep `config.yaml` in a
+user-owned directory and invoke it explicitly:
+
+```powershell
+facts-parent-partner --config C:\Automation\facts-parent-partner\config.yaml
+```
+
+For a one-off run without a persistent tool installation, use:
+
+```powershell
+uvx --from git+https://github.com/buffetboy2001/facts-parent-partner.git facts-parent-partner --config C:\Automation\facts-parent-partner\config.yaml
+```
+
+For Task Scheduler, set the action to run [run.ps1](run.ps1) with
+`-ConfigPath C:\Automation\facts-parent-partner\config.yaml`. Configure the
+`FACTS_USERNAME`, `FACTS_PASSWORD`, and `FACTS_DISTRICT_CODE` authentication
+values as environment variables for the scheduled user; do not put them in the
+YAML file or pass them as command-line arguments.
 
 ### Task
 

@@ -1,7 +1,8 @@
-"""Download PDF resources for a class in the FACTS Family Portal."""
+"""Download PDF resources for each class in the FACTS Family Portal."""
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
+from typing import Sequence
 from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import (
@@ -26,7 +28,7 @@ FAMILY_PORTAL_URL = "https://sis.factsmgt.com/family-portal"
 FACTS_DOMAIN = "factsmgt.com"
 PDF_PATTERN = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
 UPLOAD_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
-CONFIG_PATH = Path(__file__).with_name("config.yaml")
+DEFAULT_CONFIG_FILENAME = "config.yaml"
 CLASS_LINK_SELECTOR = "tr a[href]"
 CLASSES_RENDER_DELAY_MS = 5_000
 WEEKDAY_NAMES = {
@@ -108,8 +110,9 @@ def normalized_class_label(label: str) -> str:
     return " ".join(label.split()).casefold()
 
 
-def load_config(config_path: Path = CONFIG_PATH) -> AppConfig:
+def load_config(config_path: Path | None = None) -> AppConfig:
     """Load and validate the non-sensitive application configuration."""
+    config_path = (config_path or Path.cwd() / DEFAULT_CONFIG_FILENAME).expanduser()
     try:
         with config_path.open(encoding="utf-8") as file:
             data = yaml.safe_load(file)
@@ -409,9 +412,23 @@ def download_all_class_resources(page: Page, settings: Settings) -> tuple[list[P
     return saved_files, no_resource_markers
 
 
-def main() -> None:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse CLI options without placing secrets in command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Download recent FACTS class resources."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to the non-secret YAML configuration file (default: ./config.yaml).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     """Sign in and save PDF resources for every class on the Classes page."""
-    settings = load_settings(load_config())
+    args = parse_args(argv)
+    settings = load_settings(load_config(args.config))
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=settings.headless)
         context = browser.new_context(
