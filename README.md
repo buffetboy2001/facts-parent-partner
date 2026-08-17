@@ -51,6 +51,12 @@ an error if it cannot.
 uv run --env-file .env python main.py
 ```
 
+From PowerShell, run:
+
+```powershell
+.\run.ps1
+```
+
 ### Task
 
 The script visits every link in the Classes table, opens each class's

@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import (
     Download,
@@ -23,6 +23,7 @@ import yaml
 
 
 FAMILY_PORTAL_URL = "https://sis.factsmgt.com/family-portal"
+FACTS_DOMAIN = "factsmgt.com"
 PDF_PATTERN = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
 UPLOAD_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
@@ -235,6 +236,20 @@ def class_link_container(page: Page) -> tuple[Page | Frame, Locator]:
     )
 
 
+def trusted_class_url(base_url: str, href: str) -> str | None:
+    """Return a FACTS-owned class URL, rejecting unexpected destinations."""
+    url = urljoin(base_url, href)
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if (
+        parsed.scheme != "https"
+        or not (host == FACTS_DOMAIN or host.endswith(f".{FACTS_DOMAIN}"))
+        or not (parsed.path.startswith("/family-portal/") or parsed.path.startswith("/pwr/"))
+    ):
+        return None
+    return url
+
+
 def enrolled_class_urls(page: Page) -> list[tuple[str, str]]:
     """Collect the Class-column links from the loaded Classes table."""
     container, class_links = class_link_container(page)
@@ -246,7 +261,10 @@ def enrolled_class_urls(page: Page) -> list[tuple[str, str]]:
         href = link.get_attribute("href")
         if not href:
             continue
-        url = urljoin(container.url, href)
+        url = trusted_class_url(container.url, href)
+        if url is None:
+            print(f"Ignored {link.inner_text().strip()}: untrusted class link destination.")
+            continue
         if url in seen_urls:
             continue
         seen_urls.add(url)
@@ -322,12 +340,21 @@ def download_control(link: Locator) -> Locator:
 
 
 def unique_destination(directory: Path, filename: str) -> Path:
-    """Avoid overwriting a file downloaded by an earlier run."""
-    destination = directory / filename
+    """Return a unique, containment-checked destination for a server filename."""
+    # Suggested filenames come from the remote site. Normalize both separator
+    # styles before keeping only the basename, including on non-Windows hosts.
+    safe_filename = Path(filename.replace("\\", "/")).name
+    if safe_filename in {"", ".", ".."}:
+        raise RuntimeError("FACTS provided an invalid download filename.")
+
+    resolved_directory = directory.resolve()
+    destination = (resolved_directory / safe_filename).resolve()
+    if destination.parent != resolved_directory:
+        raise RuntimeError("FACTS provided a download filename outside the configured directory.")
     stem, suffix = destination.stem, destination.suffix
     counter = 2
     while destination.exists():
-        destination = directory / f"{stem} ({counter}){suffix}"
+        destination = resolved_directory / f"{stem} ({counter}){suffix}"
         counter += 1
     return destination
 
