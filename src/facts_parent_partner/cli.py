@@ -93,6 +93,21 @@ def writable_download_directory(location: str, config_path: Path) -> Path:
     return directory.resolve()
 
 
+def dated_download_directory(base_directory: Path, today: date | None = None) -> Path:
+    """Create and verify the daily download directory under the configured root."""
+    directory = base_directory / (today or date.today()).isoformat()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError(f"Cannot create daily download directory: {directory}") from error
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory):
+            pass
+    except OSError as error:
+        raise RuntimeError(f"Daily download directory is not writable: {directory}") from error
+    return directory.resolve()
+
+
 def most_recent_weekday(weekday_name: str, today: date | None = None) -> date | None:
     """Return a weekday cutoff, or ``None`` when ``all`` is configured."""
     if weekday_name.lower() == "all":
@@ -143,8 +158,9 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     visible = data.get("visible", True)
     if not isinstance(visible, bool):
         raise RuntimeError("Configuration field 'visible' must be true or false.")
+    download_root = writable_download_directory(download_location, config_path)
     return AppConfig(
-        download_dir=writable_download_directory(download_location, config_path),
+        download_dir=dated_download_directory(download_root),
         since=most_recent_weekday(since.strip()),
         skipped_classes=frozenset(normalized_class_label(class_name) for class_name in skip),
         visible=visible,

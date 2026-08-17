@@ -42,7 +42,8 @@ visible: true
 Relative download paths are resolved from the directory containing
 `config.yaml`. The directory is created when it is missing. Before opening the
 portal, the application verifies it can write to that directory and exits with
-an error if it cannot.
+an error if it cannot. Each run saves into a dated `YYYY-MM-DD` subfolder of
+`downloads.location` (for example, `downloads/2026-08-16`).
 
 ## Run
 
