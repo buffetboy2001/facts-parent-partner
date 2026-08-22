@@ -41,6 +41,7 @@ dry_run: false # Inspect the portal without writing output files when true.
 logging:
   level: DEBUG
   filename: ./facts-parent-partner.log
+  mode: append # Use replace to keep only the most recent run's records.
 ```
 
 Relative download paths are resolved from the directory containing
@@ -49,10 +50,46 @@ portal, the application verifies it can write to that directory and exits with
 an error if it cannot. Each run saves into a dated `YYYY-MM-DD` subfolder of
 `downloads.location` (for example, `downloads/2026-08-16`).
 
-The `logging` settings control both the console and file log sinks. Set
-`logging.level` to `TRACE`, `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`, or
-`CRITICAL`; `logging.filename` is resolved relative to `config.yaml` unless it
-is an absolute path. Run-stopping errors include a traceback in this log file.
+### Download date filter (`downloads.since`)
+
+`downloads.since` controls which resources are eligible for download. It
+accepts `monday`, `tuesday`, `wednesday`, `thursday`, `friday`, `saturday`,
+`sunday`, or `all` (capitalization does not matter).
+
+For a weekday value, the application finds the most recent occurrence of that
+weekday, including today, and uses it as an exclusive cutoff. Only resources
+whose displayed upload date is later than the cutoff are downloaded. For
+example, if the application runs on Sunday, 16 August 2026 with
+`since: monday`, the cutoff is Monday, 10 August, so resources dated 11 August
+or later are eligible. A resource dated on the cutoff day is not eligible.
+
+Set `since: all` to disable the date filter and consider every resource.
+
+### Logging (`logging.level` and `logging.mode`)
+
+The `logging` settings apply to both console output and the configured log
+file. `logging.filename` may be an absolute path or a path relative to the
+directory containing `config.yaml`. Run-stopping errors include a traceback in
+the log file.
+
+`logging.level` sets the minimum severity that is recorded. It accepts the
+following values (capitalization does not matter), ordered from most to least
+verbose:
+
+- `TRACE`: record all available diagnostic details.
+- `DEBUG`: record debugging details and all higher-severity messages.
+- `INFO`: record normal progress messages and all higher-severity messages.
+- `SUCCESS`: record successful-operation messages and all higher-severity messages.
+- `WARNING`: record potential problems and all higher-severity messages.
+- `ERROR`: record failures and critical messages only.
+- `CRITICAL`: record only critical failures.
+
+`logging.mode` controls what happens to records already in the log file:
+
+- `append`: preserve existing records and add the new run to the end of the
+  file. This is the default when `mode` is omitted.
+- `replace`: truncate the log file when a run starts. When that run finishes,
+  the file contains records from that run only.
 
 Set `dry_run: true` to exercise the complete portal navigation and resource
 inspection flow without downloading PDFs or creating no-resource markers.
@@ -106,13 +143,9 @@ The script visits every link in the Classes table, opens each class's
 **Resources** tab, and saves its displayed PDF documents. A class with no
 resources receives an empty `[class]_no_resources.txt` marker in the download
 directory, without stopping the other classes. Resources are processed in the
-portal's shown order. `downloads.since` accepts a weekday name and downloads
-only files with a later displayed upload date. For example, on Sunday, 16 August
-2026, `since: monday` uses 10 August 2026 as the cutoff and downloads files
-uploaded on 11 August or later. Use `since: all` to ignore upload dates and
-download every PDF found for each class. Set `visible: false` in `config.yaml`
-to run without a browser window. Set `dry_run: true` to inspect what would be
-downloaded without writing output files. Existing downloads are never overwritten.
+portal's shown order. Set `visible: false` in `config.yaml` to run without a
+browser window. Set `dry_run: true` to inspect what would be downloaded without
+writing output files. Existing downloads are never overwritten.
 
 Add class labels to `classes.skip` when a class is known never to have
 resources. Skipped classes are not opened; matching ignores capitalization and

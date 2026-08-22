@@ -69,6 +69,7 @@ class AppConfig:
     dry_run: bool
     log_level: str
     log_filename: Path
+    log_mode: str
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         raise RuntimeError("Configuration field 'classes.skip' must be a list of class names.")
     log_level = logging_config.get("level")
     log_filename = logging_config.get("filename")
+    log_mode = logging_config.get("mode", "append")
     if not isinstance(log_level, str) or log_level.upper() not in LOG_LEVELS:
         raise RuntimeError(
             "Configuration field 'logging.level' must be TRACE, DEBUG, INFO, "
@@ -201,6 +203,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         )
     if not isinstance(log_filename, str) or not log_filename.strip():
         raise RuntimeError("Configuration field 'logging.filename' must be a non-empty string.")
+    if not isinstance(log_mode, str) or log_mode.lower() not in {"append", "replace"}:
+        raise RuntimeError("Configuration field 'logging.mode' must be append or replace.")
     visible = data.get("visible", True)
     if not isinstance(visible, bool):
         raise RuntimeError("Configuration field 'visible' must be true or false.")
@@ -216,6 +220,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         dry_run=dry_run,
         log_level=log_level.upper(),
         log_filename=writable_log_file(log_filename, config_path),
+        log_mode=log_mode.lower(),
     )
 
 
@@ -223,7 +228,8 @@ def configure_logging(config: AppConfig) -> None:
     """Configure Loguru to write configured-level events to console and file."""
     logger.remove()
     logger.add(sys.stderr, level=config.log_level)
-    logger.add(config.log_filename, level=config.log_level, encoding="utf-8")
+    file_mode = "a" if config.log_mode == "append" else "w"
+    logger.add(config.log_filename, level=config.log_level, encoding="utf-8", mode=file_mode)
 
 
 def load_settings(config: AppConfig) -> Settings:
