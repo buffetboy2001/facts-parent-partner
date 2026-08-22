@@ -37,6 +37,10 @@ classes:
   skip:
     - ST HALL-M/F 9th # Exact Class-column labels to exclude before navigation.
 visible: true
+dry_run: false # Inspect the portal without writing output files when true.
+logging:
+  level: DEBUG
+  filename: ./facts-parent-partner.log
 ```
 
 Relative download paths are resolved from the directory containing
@@ -44,6 +48,14 @@ Relative download paths are resolved from the directory containing
 portal, the application verifies it can write to that directory and exits with
 an error if it cannot. Each run saves into a dated `YYYY-MM-DD` subfolder of
 `downloads.location` (for example, `downloads/2026-08-16`).
+
+The `logging` settings control both the console and file log sinks. Set
+`logging.level` to `TRACE`, `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`, or
+`CRITICAL`; `logging.filename` is resolved relative to `config.yaml` unless it
+is an absolute path. Run-stopping errors include a traceback in this log file.
+
+Set `dry_run: true` to exercise the complete portal navigation and resource
+inspection flow without downloading PDFs or creating no-resource markers.
 
 ## Run
 
@@ -99,7 +111,8 @@ only files with a later displayed upload date. For example, on Sunday, 16 August
 2026, `since: monday` uses 10 August 2026 as the cutoff and downloads files
 uploaded on 11 August or later. Use `since: all` to ignore upload dates and
 download every PDF found for each class. Set `visible: false` in `config.yaml`
-to run without a browser window. Existing downloads are never overwritten.
+to run without a browser window. Set `dry_run: true` to inspect what would be
+downloaded without writing output files. Existing downloads are never overwritten.
 
 Add class labels to `classes.skip` when a class is known never to have
 resources. Skipped classes are not opened; matching ignores capitalization and

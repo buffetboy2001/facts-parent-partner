@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 from typing import Sequence
@@ -21,6 +22,7 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 from playwright.sync_api import sync_playwright
+from loguru import logger
 import yaml
 
 
@@ -31,6 +33,9 @@ UPLOAD_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 DEFAULT_CONFIG_FILENAME = "config.yaml"
 CLASS_LINK_SELECTOR = "tr a[href]"
 CLASSES_RENDER_DELAY_MS = 5_000
+LOG_LEVELS = frozenset(
+    {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
+)
 WEEKDAY_NAMES = {
     name.lower(): number
     for number, name in enumerate(
@@ -50,6 +55,7 @@ class Settings:
     since: date | None
     skipped_classes: frozenset[str]
     headless: bool
+    dry_run: bool
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,19 @@ class AppConfig:
     since: date | None
     skipped_classes: frozenset[str]
     visible: bool
+    dry_run: bool
+    log_level: str
+    log_filename: Path
+
+
+@dataclass(frozen=True)
+class ResourceRunResult:
+    """Files written and output actions identified during a resource run."""
+
+    downloaded_files: list[Path]
+    no_resource_markers: list[Path]
+    pending_downloads: int
+    pending_no_resource_markers: int
 
 
 def required_environment(name: str) -> str:
@@ -108,6 +127,21 @@ def dated_download_directory(base_directory: Path, today: date | None = None) ->
     return directory.resolve()
 
 
+def writable_log_file(location: str, config_path: Path) -> Path:
+    """Create and verify the configured log file before Loguru uses it."""
+    configured_path = Path(location).expanduser()
+    log_file = configured_path if configured_path.is_absolute() else config_path.parent / configured_path
+    if log_file.exists() and log_file.is_dir():
+        raise RuntimeError(f"Configured log filename is a directory: {log_file}")
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8"):
+            pass
+    except OSError as error:
+        raise RuntimeError(f"Log file is not writable: {log_file}") from error
+    return log_file.resolve()
+
+
 def most_recent_weekday(weekday_name: str, today: date | None = None) -> date | None:
     """Return a weekday cutoff, or ``None`` when ``all`` is configured."""
     if weekday_name.lower() == "all":
@@ -140,10 +174,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         raise RuntimeError("Configuration must contain a YAML mapping.")
     downloads = data.get("downloads")
     classes = data.get("classes", {})
+    logging_config = data.get("logging")
     if not isinstance(downloads, dict):
         raise RuntimeError("Configuration field 'downloads' must be a mapping.")
     if not isinstance(classes, dict):
         raise RuntimeError("Configuration field 'classes' must be a mapping.")
+    if not isinstance(logging_config, dict):
+        raise RuntimeError("Configuration field 'logging' must be a mapping.")
     download_location = downloads.get("location")
     since = downloads.get("since")
     if not isinstance(download_location, str) or not download_location.strip():
@@ -155,16 +192,38 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         not isinstance(class_name, str) or not class_name.strip() for class_name in skip
     ):
         raise RuntimeError("Configuration field 'classes.skip' must be a list of class names.")
+    log_level = logging_config.get("level")
+    log_filename = logging_config.get("filename")
+    if not isinstance(log_level, str) or log_level.upper() not in LOG_LEVELS:
+        raise RuntimeError(
+            "Configuration field 'logging.level' must be TRACE, DEBUG, INFO, "
+            "SUCCESS, WARNING, ERROR, or CRITICAL."
+        )
+    if not isinstance(log_filename, str) or not log_filename.strip():
+        raise RuntimeError("Configuration field 'logging.filename' must be a non-empty string.")
     visible = data.get("visible", True)
     if not isinstance(visible, bool):
         raise RuntimeError("Configuration field 'visible' must be true or false.")
+    dry_run = data.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        raise RuntimeError("Configuration field 'dry_run' must be true or false.")
     download_root = writable_download_directory(download_location, config_path)
     return AppConfig(
         download_dir=dated_download_directory(download_root),
         since=most_recent_weekday(since.strip()),
         skipped_classes=frozenset(normalized_class_label(class_name) for class_name in skip),
         visible=visible,
+        dry_run=dry_run,
+        log_level=log_level.upper(),
+        log_filename=writable_log_file(log_filename, config_path),
     )
+
+
+def configure_logging(config: AppConfig) -> None:
+    """Configure Loguru to write configured-level events to console and file."""
+    logger.remove()
+    logger.add(sys.stderr, level=config.log_level)
+    logger.add(config.log_filename, level=config.log_level, encoding="utf-8")
 
 
 def load_settings(config: AppConfig) -> Settings:
@@ -177,6 +236,7 @@ def load_settings(config: AppConfig) -> Settings:
         since=config.since,
         skipped_classes=config.skipped_classes,
         headless=not config.visible,
+        dry_run=config.dry_run,
     )
 
 
@@ -282,7 +342,7 @@ def enrolled_class_urls(page: Page) -> list[tuple[str, str]]:
             continue
         url = trusted_class_url(container.url, href)
         if url is None:
-            print(f"Ignored {link.inner_text().strip()}: untrusted class link destination.")
+            logger.error("Ignored {}: untrusted class link destination.", link.inner_text().strip())
             continue
         if url in seen_urls:
             continue
@@ -387,14 +447,19 @@ def no_resources_marker(directory: Path, class_label: str) -> Path:
     return marker
 
 
-def download_pdfs(page: Page, settings: Settings) -> list[Path]:
+def download_pdfs(page: Page, settings: Settings) -> tuple[list[Path], int]:
     """Download PDFs newer than the cutoff, or every PDF in ``all`` mode."""
     saved_files: list[Path] = []
+    pending_downloads = 0
     for link in pdf_resource_links(page):
         upload_date = resource_upload_date(link)
         if settings.since is not None and (
             upload_date is None or upload_date <= settings.since
         ):
+            continue
+        if settings.dry_run:
+            logger.debug("Dry run: would download {}.", link.inner_text().strip())
+            pending_downloads += 1
             continue
         with page.expect_download(timeout=30_000) as download_info:
             download_control(link).click()
@@ -402,30 +467,46 @@ def download_pdfs(page: Page, settings: Settings) -> list[Path]:
         destination = unique_destination(settings.download_dir, download.suggested_filename)
         download.save_as(destination)
         saved_files.append(destination)
-    return saved_files
+        logger.trace("Downloaded PDF: {}", destination.name)
+    return saved_files, pending_downloads
 
 
-def download_all_class_resources(page: Page, settings: Settings) -> tuple[list[Path], list[Path]]:
+def download_all_class_resources(page: Page, settings: Settings) -> ResourceRunResult:
     """Visit every listed class and collect PDFs or no-resource markers."""
     open_classes(page)
     classes = enrolled_class_urls(page)
     saved_files: list[Path] = []
     no_resource_markers: list[Path] = []
+    pending_downloads = 0
+    pending_no_resource_markers = 0
     for class_label, class_url in classes:
         if normalized_class_label(class_label) in settings.skipped_classes:
-            print(f"Skipped {class_label}: configured in classes.skip.")
+            logger.debug("Skipped {}: configured in classes.skip.", class_label)
             continue
         try:
             has_documents = open_class_resources(page, class_url)
             if not has_documents:
-                no_resource_markers.append(
-                    no_resources_marker(settings.download_dir, class_label)
-                )
+                if settings.dry_run:
+                    logger.debug(
+                        "Dry run: would create a no-resources marker for {}.", class_label
+                    )
+                    pending_no_resource_markers += 1
+                else:
+                    no_resource_markers.append(
+                        no_resources_marker(settings.download_dir, class_label)
+                    )
                 continue
-            saved_files.extend(download_pdfs(page, settings))
+            class_files, class_pending_downloads = download_pdfs(page, settings)
+            saved_files.extend(class_files)
+            pending_downloads += class_pending_downloads
         except (PlaywrightTimeoutError, RuntimeError) as error:
-            print(f"Skipped {class_label}: resources could not be loaded ({error}).")
-    return saved_files, no_resource_markers
+            logger.error("Skipped {}: resources could not be loaded ({}).", class_label, error)
+    return ResourceRunResult(
+        downloaded_files=saved_files,
+        no_resource_markers=no_resource_markers,
+        pending_downloads=pending_downloads,
+        pending_no_resource_markers=pending_no_resource_markers,
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -444,32 +525,53 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     """Sign in and save PDF resources for every class on the Classes page."""
     args = parse_args(argv)
-    settings = load_settings(load_config(args.config))
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=settings.headless)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 720}, accept_downloads=True
-        )
-        page = context.new_page()
-        page.set_default_timeout(15_000)
-        try:
-            sign_in(page, settings)
-            downloaded_files, no_resource_markers = download_all_class_resources(
-                page, settings
+    try:
+        config = load_config(args.config)
+    except Exception:
+        # Configuration can fail before its file sink is usable, so this is
+        # emitted through Loguru's default stderr sink for Task Scheduler.
+        logger.exception("Unable to load application configuration.")
+        raise
+    configure_logging(config)
+    try:
+        settings = load_settings(config)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=settings.headless)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 720}, accept_downloads=True
             )
-            cutoff_description = (
-                "all upload dates"
-                if settings.since is None
-                else f"upload dates after {settings.since:%d %B %Y}"
-            )
-            print(
-                f"Downloaded {len(downloaded_files)} PDF resource(s) for "
-                f"{cutoff_description}; created {len(no_resource_markers)} "
-                "no-resources marker file(s)."
-            )
-        finally:
-            context.close()
-            browser.close()
+            page = context.new_page()
+            page.set_default_timeout(15_000)
+            try:
+                sign_in(page, settings)
+                result = download_all_class_resources(page, settings)
+                cutoff_description = (
+                    "all upload dates"
+                    if settings.since is None
+                    else f"upload dates after {settings.since:%d %B %Y}"
+                )
+                if settings.dry_run:
+                    logger.debug(
+                        "Dry run: would download {} PDF resource(s) for {}; would create "
+                        "{} no-resources marker file(s).",
+                        result.pending_downloads,
+                        cutoff_description,
+                        result.pending_no_resource_markers,
+                    )
+                else:
+                    logger.debug(
+                        "Downloaded {} PDF resource(s) for {}; created {} no-resources "
+                        "marker file(s).",
+                        len(result.downloaded_files),
+                        cutoff_description,
+                        len(result.no_resource_markers),
+                    )
+            finally:
+                context.close()
+                browser.close()
+    except Exception:
+        logger.exception("FACTS resource download run failed.")
+        raise
 
 
 if __name__ == "__main__":
