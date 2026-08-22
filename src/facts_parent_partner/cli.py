@@ -70,6 +70,7 @@ class AppConfig:
     log_level: str
     log_filename: Path
     log_mode: str
+    yaml_settings: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -221,15 +222,50 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         log_level=log_level.upper(),
         log_filename=writable_log_file(log_filename, config_path),
         log_mode=log_mode.lower(),
+        yaml_settings={
+            "downloads.location": download_location,
+            "downloads.since": since,
+            "classes.skip": skip,
+            "visible": visible,
+            "dry_run": dry_run,
+            "logging.level": log_level,
+            "logging.filename": log_filename,
+            "logging.mode": log_mode,
+        },
     )
 
 
 def configure_logging(config: AppConfig) -> None:
     """Configure Loguru to write configured-level events to console and file."""
+    minimum_level = logger.level(config.log_level).no
+
+    def configured_level_or_run_start(record: dict[str, object]) -> bool:
+        return bool(
+            record["extra"].get("run_start")
+            or record["level"].no >= minimum_level
+        )
+
     logger.remove()
-    logger.add(sys.stderr, level=config.log_level)
+    logger.add(sys.stderr, level="TRACE", filter=configured_level_or_run_start)
     file_mode = "a" if config.log_mode == "append" else "w"
-    logger.add(config.log_filename, level=config.log_level, encoding="utf-8", mode=file_mode)
+    logger.add(
+        config.log_filename,
+        level="TRACE",
+        filter=configured_level_or_run_start,
+        encoding="utf-8",
+        mode=file_mode,
+    )
+
+
+def log_run_started() -> None:
+    """Emit the run marker even when the configured threshold is above INFO."""
+    logger.bind(run_start=True).info("FACTS Parent Partner run started.")
+
+
+def log_configuration(config: AppConfig) -> None:
+    """Log the validated, non-secret YAML settings at the start of a run."""
+    for name, value in config.yaml_settings.items():
+        logger.debug("YAML setting {}: {}", name, value)
 
 
 def load_settings(config: AppConfig) -> Settings:
@@ -566,6 +602,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         logger.exception("Unable to load application configuration.")
         raise
     configure_logging(config)
+    log_run_started()
+    log_configuration(config)
     try:
         settings = load_settings(config)
         with sync_playwright() as playwright:
