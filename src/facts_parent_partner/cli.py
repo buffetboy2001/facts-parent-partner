@@ -32,7 +32,7 @@ PDF_PATTERN = re.compile(r"\.pdf(?:$|[?#])", re.IGNORECASE)
 UPLOAD_DATE_PATTERN = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
 DEFAULT_CONFIG_FILENAME = "config.yaml"
 CLASS_LINK_SELECTOR = "tr a[href]"
-CLASSES_RENDER_DELAY_MS = 5_000
+CLASSES_RENDER_TIMEOUT_SECONDS = 30
 LOG_LEVELS = frozenset(
     {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}
 )
@@ -287,26 +287,53 @@ def sign_in(page: Page, settings: Settings) -> None:
     page.get_by_text("School Home", exact=True).wait_for(state="visible", timeout=30_000)
 
 
-def open_classes(page: Page) -> None:
-    """Navigate to Classes; the class-list wait is the readiness signal."""
+def click_classes_after_portal_settles(page: Page) -> None:
+    """Use FACTS's in-app route only after its home application becomes idle."""
     classes_link = page.locator("a[href*='/school/classes']").first
     try:
-        classes_link.wait_for(state="visible", timeout=5_000)
+        classes_link.wait_for(state="visible", timeout=30_000)
     except PlaywrightTimeoutError:
         # Keep a text fallback for portal versions without an href.
-        page.get_by_text("Classes", exact=True).first.click()
-    else:
-        classes_link.click()
+        classes_link = page.get_by_text("Classes", exact=True).first
+        classes_link.wait_for(state="visible", timeout=30_000)
+
+    # FACTS can display its navigation before the surrounding application has
+    # finished initializing. Preserve its in-memory routing context by using
+    # the link, but do not click while startup requests are still in flight.
+    try:
+        page.wait_for_load_state("networkidle", timeout=30_000)
+    except PlaywrightTimeoutError:
+        logger.warning("FACTS remained network-active before Classes navigation.")
+    classes_link.click()
     page.wait_for_url("**/school/classes**", timeout=30_000)
-    # FACTS often updates the URL before its class-list application finishes
-    # initializing. Give that client-side transition time to complete before
-    # polling for class links.
-    page.wait_for_timeout(CLASSES_RENDER_DELAY_MS)
 
 
-def class_link_container(page: Page) -> tuple[Page | Frame, Locator]:
+def open_classes(page: Page) -> None:
+    """Open Classes and repeat the in-app transition once after a bad render."""
+    for attempt in range(2):
+        if attempt:
+            logger.warning(
+                "Classes did not render cleanly; returning to School Home and retrying once."
+            )
+            page.go_back(wait_until="domcontentloaded")
+            page.get_by_text("School Home", exact=True).first.wait_for(
+                state="visible", timeout=30_000
+            )
+
+        click_classes_after_portal_settles(page)
+        try:
+            class_link_container(page, timeout=CLASSES_RENDER_TIMEOUT_SECONDS)
+            return
+        except RuntimeError:
+            if attempt:
+                raise
+
+
+def class_link_container(
+    page: Page, timeout: float = CLASSES_RENDER_TIMEOUT_SECONDS
+) -> tuple[Page | Frame, Locator]:
     """Locate class links in the page or an embedded FACTS school frame."""
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for container in [page, *page.frames]:
             # FACTS currently renders a conventional table. Do not require
